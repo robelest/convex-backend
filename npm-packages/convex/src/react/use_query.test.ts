@@ -8,7 +8,6 @@ import { anyApi } from "../server/api.js";
 
 import type { ApiFromModules, QueryBuilder } from "../server/index.js";
 import { useQuery as useQueryReal } from "./client.js";
-import type { Preloaded } from "./hydration.js";
 
 // Intentional noop, we're just testing types.
 const useQuery = (() => {}) as unknown as typeof useQueryReal;
@@ -77,25 +76,8 @@ describe("useQuery types", () => {
     });
 
     useQuery({
-      query: api.module.noArgs,
-      args: {},
-    });
-
-    useQuery({
       query: api.module.args,
       args: { _arg: "asdf" },
-    });
-
-    useQuery({
-      query: api.module.args,
-      args: { _arg: "asdf" },
-      initialValue: "initial value",
-    });
-
-    useQuery({
-      query: api.module.args,
-      args: { _arg: "asdf" },
-      throwOnError: true,
     });
 
     const _arg: string | undefined = undefined;
@@ -109,36 +91,12 @@ describe("useQuery types", () => {
           },
     );
 
-    const {
-      status: _status,
-      data: _data,
-      error: _error,
-    } = useQuery({
+    const _result = useQuery({
       query: api.module.args,
       args: { _arg: "asdf" },
-      initialValue: "initial value",
-      throwOnError: true,
     });
-    if (_status === "success") {
-      expectTypeOf(_data).toEqualTypeOf("initial value");
-    }
-    if (_status === "error") {
-      expectTypeOf(_error).toEqualTypeOf<Error>();
-    }
-    if (_status === "loading") {
-      expectTypeOf(_data).toEqualTypeOf<undefined>();
-    }
+    expectTypeOf(_result).toEqualTypeOf<string | undefined>();
 
     useQuery("skip");
-  });
-
-  test("Queries with preloaded options", () => {
-    const {
-      status: _status,
-      data: _data,
-      error: _error,
-    } = useQuery({
-      preloaded: {} as Preloaded<typeof api.module.noArgs>,
-    });
   });
 });
