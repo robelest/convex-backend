@@ -34,6 +34,103 @@ export async function innerEsbuild({
   includeSourcesContent?: boolean;
   splitting?: boolean | undefined;
 }) {
+  // When bundling for the V8 isolate (platform: "browser"), add plugins
+  // that resolve Node.js built-ins to inline shims. This allows libraries
+  // like OpenTelemetry and LangGraph to work in isolate-mode code.
+  const nodeShimsPlugin: esbuild.Plugin = {
+    name: "convex-node-shims",
+    setup(build) {
+      if (platform !== "browser") return;
+
+      // --- async_hooks / node:async_hooks ---
+      // Re-exports the globals installed by the UDF runtime polyfill
+      // (04_async_hooks.ts). Used by OpenTelemetry and LangGraph.
+      const asyncHooksFilter = /^(node:)?async_hooks$/;
+      build.onResolve({ filter: asyncHooksFilter }, (args) => ({
+        path: args.path,
+        namespace: "async-hooks-shim",
+      }));
+      build.onLoad({ filter: /.*/, namespace: "async-hooks-shim" }, () => ({
+        contents: `
+            const m = globalThis.__async_hooks__;
+            export const AsyncLocalStorage = globalThis.AsyncLocalStorage;
+            export const AsyncResource = globalThis.AsyncResource;
+            export const createHook = m ? m.createHook : () => ({ enable() { return this; }, disable() { return this; } });
+            export const executionAsyncId = m ? m.executionAsyncId : () => 0;
+            export const triggerAsyncId = m ? m.triggerAsyncId : () => 0;
+            export const executionAsyncResource = m ? m.executionAsyncResource : () => ({});
+            export const asyncWrapProviders = m ? m.asyncWrapProviders : {};
+            export default { AsyncLocalStorage, AsyncResource, createHook, executionAsyncId, triggerAsyncId, executionAsyncResource, asyncWrapProviders };
+          `,
+        loader: "js",
+      }));
+
+      // --- events / node:events ---
+      // Minimal EventEmitter stub. OpenTelemetry's
+      // AbstractAsyncHooksContextManager imports EventEmitter to bind context
+      // onto event listeners. In the Convex V8 isolate there are no real
+      // EventEmitter instances, so this stub is sufficient.
+      const eventsFilter = /^(node:)?events$/;
+      build.onResolve({ filter: eventsFilter }, (args) => ({
+        path: args.path,
+        namespace: "events-shim",
+      }));
+      build.onLoad({ filter: /.*/, namespace: "events-shim" }, () => ({
+        contents: `
+            class EventEmitter {
+              constructor() { this._listeners = {}; }
+              on(event, fn) { return this.addListener(event, fn); }
+              addListener(event, fn) {
+                if (!this._listeners[event]) this._listeners[event] = [];
+                this._listeners[event].push(fn);
+                return this;
+              }
+              once(event, fn) {
+                const wrapped = (...args) => { this.removeListener(event, wrapped); fn(...args); };
+                return this.addListener(event, wrapped);
+              }
+              off(event, fn) { return this.removeListener(event, fn); }
+              removeListener(event, fn) {
+                if (this._listeners[event]) {
+                  this._listeners[event] = this._listeners[event].filter(l => l !== fn);
+                }
+                return this;
+              }
+              removeAllListeners(event) {
+                if (event) { delete this._listeners[event]; }
+                else { this._listeners = {}; }
+                return this;
+              }
+              emit(event, ...args) {
+                const fns = this._listeners[event];
+                if (!fns || fns.length === 0) return false;
+                fns.slice().forEach(fn => fn(...args));
+                return true;
+              }
+              listenerCount(event) { return (this._listeners[event] || []).length; }
+              listeners(event) { return (this._listeners[event] || []).slice(); }
+              eventNames() { return Object.keys(this._listeners); }
+              prependListener(event, fn) {
+                if (!this._listeners[event]) this._listeners[event] = [];
+                this._listeners[event].unshift(fn);
+                return this;
+              }
+              prependOnceListener(event, fn) {
+                const wrapped = (...args) => { this.removeListener(event, wrapped); fn(...args); };
+                return this.prependListener(event, wrapped);
+              }
+              setMaxListeners() { return this; }
+              getMaxListeners() { return 10; }
+              rawListeners(event) { return this.listeners(event); }
+            }
+            export { EventEmitter };
+            export default EventEmitter;
+          `,
+        loader: "js",
+      }));
+    },
+  };
+
   const result = await esbuild.build({
     entryPoints,
     bundle: true,
@@ -44,7 +141,7 @@ export async function innerEsbuild({
     outdir: "out",
     outbase: dir,
     conditions: ["convex", "module", ...extraConditions],
-    plugins,
+    plugins: [nodeShimsPlugin, ...plugins],
     write: false,
     sourcemap: generateSourceMaps,
     sourcesContent: includeSourcesContent,
